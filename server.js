@@ -218,6 +218,7 @@ setInterval(() => {
   const now = Date.now();
   let cleaned = 0;
 
+  // 1. 清理 rooms 里记录的过期文件
   for (const [code, room] of rooms) {
     if (now - room.createdAt > MAX_FILE_AGE) {
       if (fs.existsSync(room.filePath)) {
@@ -226,6 +227,32 @@ setInterval(() => {
 
       rooms.delete(code);
       cleaned++;
+    }
+  }
+
+  // 2. 扫描 uploads 文件夹，清理没有记录的孤儿文件
+  if (fs.existsSync(UPLOAD_DIR)) {
+    const files = fs.readdirSync(UPLOAD_DIR);
+
+    for (const file of files) {
+      const filePath = path.join(UPLOAD_DIR, file);
+
+      try {
+        const stat = fs.statSync(filePath);
+
+        if (!stat.isFile()) continue;
+
+        const isReferenced = Array.from(rooms.values()).some(room => room.filePath === filePath);
+        const isExpired = now - stat.mtimeMs > MAX_FILE_AGE;
+
+        if (!isReferenced && isExpired) {
+          fs.unlinkSync(filePath);
+          cleaned++;
+          console.log(`[清理孤儿文件] ${file}`);
+        }
+      } catch (err) {
+        console.error('[清理文件失败]', filePath, err);
+      }
     }
   }
 
