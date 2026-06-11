@@ -1,24 +1,49 @@
-﻿// 文件快传 - 前端逻辑
+// 文件快传 - 前端逻辑
 
 const $ = id => document.getElementById(id);
-const dom = {
-  connectPanel: $('connectPanel'), codePanel: $('codePanel'),
-  tabSend: $('tabSend'), tabReceive: $('tabReceive'),
-  sendMode: $('sendMode'), receiveMode: $('receiveMode'),
 
-  dropZone: $('dropZone'), fileInput: $('fileInput'),
-  fileInfo: $('fileInfo'), fileName: $('fileName'), fileSize: $('fileSize'),
-  btnUpload: $('btnUpload'), btnCancelFile: $('btnCancelFile'),
+const dom = {
+  connectPanel: $('connectPanel'),
+  codePanel: $('codePanel'),
+
+  tabSend: $('tabSend'),
+  tabReceive: $('tabReceive'),
+
+  sendMode: $('sendMode'),
+  receiveMode: $('receiveMode'),
+
+  transferNormal: $('transferNormal'),
+  transferPrivate: $('transferPrivate'),
+  privateTip: $('privateTip'),
+
+  dropZone: $('dropZone'),
+  fileInput: $('fileInput'),
+
+  fileInfo: $('fileInfo'),
+  fileName: $('fileName'),
+  fileSize: $('fileSize'),
+
+  btnUpload: $('btnUpload'),
+  btnCancelFile: $('btnCancelFile'),
 
   uploadProgress: $('uploadProgress'),
-  uploadFill: $('uploadFill'), uploadPercent: $('uploadPercent'),
+  uploadFill: $('uploadFill'),
+  uploadPercent: $('uploadPercent'),
   uploadTransferred: $('uploadTransferred'),
 
-  codeInput: $('codeInput'), btnCheck: $('btnCheck'),
-  receiveResult: $('receiveResult'),
-  recvName: $('recvName'), recvSize: $('recvSize'), btnDownload: $('btnDownload'),
+  codeInput: $('codeInput'),
+  btnCheck: $('btnCheck'),
 
-  codeDisplay: $('codeDisplay'), btnCopy: $('btnCopy'), btnNewSend: $('btnNewSend'),
+  receiveResult: $('receiveResult'),
+  recvName: $('recvName'),
+  recvSize: $('recvSize'),
+  recvMode: $('recvMode'),
+  btnDownload: $('btnDownload'),
+
+  codeDisplay: $('codeDisplay'),
+  codeMode: $('codeMode'),
+  btnCopy: $('btnCopy'),
+  btnNewSend: $('btnNewSend'),
 
   toast: $('toast')
 };
@@ -26,13 +51,18 @@ const dom = {
 // 状态
 let selectedFile = null;
 let currentCode = null;
+let currentMode = 'normal';
 
-// ---- 工具函数 ----
+// =========================
+// 工具函数
+// =========================
 
 function fmtSize(bytes) {
   if (bytes === 0) return '0 B';
+
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
+
   return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
 }
 
@@ -41,15 +71,31 @@ function showToast(msg, type) {
   t.textContent = msg;
   t.className = 'toast' + (type ? ' ' + type : '');
   t.classList.remove('hidden');
+
   clearTimeout(t._hide);
   t._hide = setTimeout(() => t.classList.add('hidden'), 4000);
 }
 
-// ---- Tab 切换 ----
+function getSelectedTransferMode() {
+  if (dom.transferPrivate && dom.transferPrivate.checked) {
+    return 'private';
+  }
+
+  return 'normal';
+}
+
+function getModeText(mode) {
+  return mode === 'private' ? '私密传输：阅后即焚，仅可下载一次' : '普通传输：有效期内可下载';
+}
+
+// =========================
+// Tab 切换
+// =========================
 
 dom.tabSend.addEventListener('click', () => {
   dom.tabSend.classList.add('active');
   dom.tabReceive.classList.remove('active');
+
   dom.sendMode.classList.remove('hidden');
   dom.receiveMode.classList.add('hidden');
   dom.receiveResult.classList.add('hidden');
@@ -58,12 +104,38 @@ dom.tabSend.addEventListener('click', () => {
 dom.tabReceive.addEventListener('click', () => {
   dom.tabReceive.classList.add('active');
   dom.tabSend.classList.remove('active');
+
   dom.receiveMode.classList.remove('hidden');
   dom.sendMode.classList.add('hidden');
+
   dom.codeInput.focus();
 });
 
-// ---- 选择文件 ----
+// =========================
+// 传输模式切换
+// =========================
+
+if (dom.transferNormal && dom.transferPrivate) {
+  dom.transferNormal.addEventListener('change', () => {
+    currentMode = getSelectedTransferMode();
+
+    if (dom.privateTip) {
+      dom.privateTip.classList.add('hidden');
+    }
+  });
+
+  dom.transferPrivate.addEventListener('change', () => {
+    currentMode = getSelectedTransferMode();
+
+    if (dom.privateTip) {
+      dom.privateTip.classList.remove('hidden');
+    }
+  });
+}
+
+// =========================
+// 选择文件
+// =========================
 
 dom.dropZone.addEventListener('click', () => dom.fileInput.click());
 
@@ -78,43 +150,61 @@ dom.dropZone.addEventListener('dragleave', () => {
 
 dom.dropZone.addEventListener('drop', (e) => {
   e.preventDefault();
+
   dom.dropZone.classList.remove('dragover');
-  if (e.dataTransfer.files.length > 0) selectFile(e.dataTransfer.files[0]);
+
+  if (e.dataTransfer.files.length > 0) {
+    selectFile(e.dataTransfer.files[0]);
+  }
 });
 
 dom.fileInput.addEventListener('change', () => {
-  if (dom.fileInput.files.length > 0) selectFile(dom.fileInput.files[0]);
+  if (dom.fileInput.files.length > 0) {
+    selectFile(dom.fileInput.files[0]);
+  }
 });
 
 function selectFile(file) {
   selectedFile = file;
+
   dom.fileName.textContent = file.name;
   dom.fileSize.textContent = fmtSize(file.size);
+
   dom.fileInfo.classList.remove('hidden');
   dom.uploadProgress.classList.add('hidden');
 }
 
 dom.btnCancelFile.addEventListener('click', () => {
   selectedFile = null;
+
   dom.fileInfo.classList.add('hidden');
   dom.fileInput.value = '';
 });
 
-// ---- 上传文件 ----
+// =========================
+// 上传文件
+// =========================
 
 dom.btnUpload.addEventListener('click', startUpload);
 
 function startUpload() {
-  if (!selectedFile) return;
+  if (!selectedFile) {
+    showToast('请先选择文件', 'error');
+    return;
+  }
+
+  const mode = getSelectedTransferMode();
 
   const formData = new FormData();
   formData.append('file', selectedFile);
+  formData.append('mode', mode);
 
   const xhr = new XMLHttpRequest();
 
   xhr.upload.addEventListener('progress', (e) => {
     if (e.lengthComputable) {
       const pct = Math.min(100, (e.loaded / e.total) * 100);
+
       dom.uploadFill.style.width = pct + '%';
       dom.uploadPercent.textContent = pct.toFixed(1) + '%';
       dom.uploadTransferred.textContent = fmtSize(e.loaded) + ' / ' + fmtSize(e.total);
@@ -122,19 +212,44 @@ function startUpload() {
   });
 
   xhr.addEventListener('load', () => {
-  if (xhr.status === 200) {
-    const data = JSON.parse(xhr.responseText);
-    currentCode = data.code;
-    showCodePanel(data.code);
-    showToast('上传完成！', 'success');
-  } else if (xhr.status === 413) {
-    showToast('文件太大，超过服务器限制', 'error');
-  } else {
-    showToast('上传失败，状态码：' + xhr.status, 'error');
-  }
-});
+    if (xhr.status === 200) {
+      const data = JSON.parse(xhr.responseText);
 
-  xhr.addEventListener('error', () => showToast('上传失败：网络错误', 'error'));
+      currentCode = data.code;
+      currentMode = data.mode || mode;
+
+      showCodePanel(data.code, currentMode);
+
+      if (currentMode === 'private') {
+        showToast('私密文件上传完成！下载一次后会自动销毁', 'success');
+      } else {
+        showToast('上传完成！', 'success');
+      }
+
+      return;
+    }
+
+    if (xhr.status === 413) {
+      showToast('文件太大，超过服务器限制', 'error');
+      return;
+    }
+
+    try {
+      const err = JSON.parse(xhr.responseText);
+      showToast(err.error || ('上传失败，状态码：' + xhr.status), 'error');
+    } catch (e) {
+      showToast('上传失败，状态码：' + xhr.status, 'error');
+    }
+  });
+
+  xhr.addEventListener('error', () => {
+    showToast('上传失败：网络错误', 'error');
+  });
+
+  xhr.addEventListener('abort', () => {
+    showToast('上传已取消', 'error');
+  });
+
   xhr.addEventListener('loadend', () => {
     dom.btnUpload.disabled = false;
     dom.fileInput.value = '';
@@ -149,12 +264,20 @@ function startUpload() {
   dom.btnUpload.disabled = true;
 }
 
-// ---- 取件码面板 ----
+// =========================
+// 取件码面板
+// =========================
 
-function showCodePanel(code) {
+function showCodePanel(code, mode) {
   dom.connectPanel.classList.add('hidden');
   dom.codePanel.classList.remove('hidden');
+
   dom.codeDisplay.textContent = code;
+
+  if (dom.codeMode) {
+    dom.codeMode.textContent = getModeText(mode);
+    dom.codeMode.className = mode === 'private' ? 'mode-text private' : 'mode-text normal';
+  }
 }
 
 dom.btnCopy.addEventListener('click', () => {
@@ -169,41 +292,63 @@ dom.btnCopy.addEventListener('click', () => {
 
 dom.btnNewSend.addEventListener('click', () => {
   currentCode = null;
+
   dom.codePanel.classList.add('hidden');
   dom.connectPanel.classList.remove('hidden');
+
   dom.uploadProgress.classList.add('hidden');
   dom.uploadFill.style.width = '0%';
   dom.uploadPercent.textContent = '0%';
   dom.uploadTransferred.textContent = '-- / --';
 });
 
-// ---- 接收文件 ----
+// =========================
+// 接收文件
+// =========================
 
 dom.btnCheck.addEventListener('click', checkCode);
+
 dom.codeInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') checkCode();
+  if (e.key === 'Enter') {
+    checkCode();
+  }
 });
 
 async function checkCode() {
   const code = dom.codeInput.value.trim().toUpperCase();
+
   if (code.length !== 5) {
     showToast('请输入5位取件码', 'error');
     return;
   }
 
   try {
-    const res = await fetch('/api/room/' + code);
+    const res = await fetch('/api/room/' + encodeURIComponent(code));
+
     if (!res.ok) {
-      showToast('取件码无效或已过期', 'error');
+      if (res.status === 410) {
+        showToast('私密文件已被读取或正在读取', 'error');
+      } else {
+        showToast('取件码无效或已过期', 'error');
+      }
+
       dom.receiveResult.classList.add('hidden');
       return;
     }
+
     const data = await res.json();
+
     dom.recvName.textContent = data.name;
     dom.recvSize.textContent = fmtSize(data.size);
+
+    if (dom.recvMode) {
+      dom.recvMode.textContent = getModeText(data.mode);
+      dom.recvMode.className = data.mode === 'private' ? 'mode-text private' : 'mode-text normal';
+    }
+
     dom.receiveResult.classList.remove('hidden');
     dom.btnDownload.dataset.code = code;
-    dom.btnDownload.setAttribute('href', '/api/download/' + encodeURIComponent(code));
+    dom.btnDownload.dataset.mode = data.mode || 'normal';
   } catch (err) {
     showToast('网络错误', 'error');
   }
@@ -211,6 +356,7 @@ async function checkCode() {
 
 dom.btnDownload.addEventListener('click', () => {
   const code = dom.btnDownload.dataset.code;
+  const mode = dom.btnDownload.dataset.mode || 'normal';
 
   if (!code) {
     showToast('请先输入取件码', 'error');
@@ -219,9 +365,12 @@ dom.btnDownload.addEventListener('click', () => {
 
   const downloadUrl = '/api/download/' + encodeURIComponent(code);
 
-  showToast('正在打开下载链接...', 'success');
+  if (mode === 'private') {
+    showToast('私密下载即将开始，下载后文件会自动销毁', 'success');
+  } else {
+    showToast('正在打开下载链接...', 'success');
+  }
 
-  // 延迟一点点，让提示能显示出来
   setTimeout(() => {
     window.location.href = downloadUrl;
   }, 300);
