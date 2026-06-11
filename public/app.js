@@ -201,6 +201,7 @@ async function checkCode() {
     dom.recvSize.textContent = fmtSize(data.size);
     dom.receiveResult.classList.remove('hidden');
     dom.btnDownload.dataset.code = code;
+    dom.btnDownload.setAttribute('href', '/api/download/' + encodeURIComponent(code));
   } catch (err) {
     showToast('网络错误', 'error');
   }
@@ -208,16 +209,18 @@ async function checkCode() {
 
 dom.btnDownload.addEventListener('click', () => {
   const code = dom.btnDownload.dataset.code;
-  if (!code) return;
 
-  const a = document.createElement('a');
-  a.href = '/api/download/' + code;
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  if (!code) {
+    showToast('请先输入取件码', 'error');
+    return;
+  }
 
-  dom.receiveResult.classList.add('hidden');
-  dom.codeInput.value = '';
-  showToast('下载已开始', 'success');
+  const downloadUrl = '/api/download/' + encodeURIComponent(code);
+
+  showToast('正在打开下载链接...', 'success');
+
+  // 延迟一点点，让提示能显示出来
+  setTimeout(() => {
+    window.location.href = downloadUrl;
+  }, 300);
 });
