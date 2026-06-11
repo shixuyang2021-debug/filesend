@@ -234,6 +234,18 @@ setInterval(() => {
   }
 }, CLEANUP_INTERVAL);
 
+
+// 加在这里：全局错误处理
+app.use((err, req, res, next) => {
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ error: '文件太大，超过服务器限制' });
+  }
+
+  console.error('[服务器错误]', err);
+  res.status(500).json({ error: '服务器错误' });
+});
+
+
 app.listen(PORT, () => {
   console.log('\n  文件快传服务已启动');
   console.log(`  端口: ${PORT}`);
