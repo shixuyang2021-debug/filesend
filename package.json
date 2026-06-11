@@ -1,7 +1,7 @@
 {
   "name": "filesend",
   "version": "2.0.0",
-  "description": "文件快传 - 服务器中转文件传输",
+  "description": "filesend server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
