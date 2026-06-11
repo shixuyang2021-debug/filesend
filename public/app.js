@@ -122,15 +122,17 @@ function startUpload() {
   });
 
   xhr.addEventListener('load', () => {
-    if (xhr.status === 200) {
-      const data = JSON.parse(xhr.responseText);
-      currentCode = data.code;
-      showCodePanel(data.code);
-      showToast('上传完成！', 'success');
-    } else {
-      showToast('上传失败', 'error');
-    }
-  });
+  if (xhr.status === 200) {
+    const data = JSON.parse(xhr.responseText);
+    currentCode = data.code;
+    showCodePanel(data.code);
+    showToast('上传完成！', 'success');
+  } else if (xhr.status === 413) {
+    showToast('文件太大，超过服务器限制', 'error');
+  } else {
+    showToast('上传失败，状态码：' + xhr.status, 'error');
+  }
+});
 
   xhr.addEventListener('error', () => showToast('上传失败：网络错误', 'error'));
   xhr.addEventListener('loadend', () => {
