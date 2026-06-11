@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -22,25 +22,55 @@
 
     <!-- 发送模式 -->
     <div class="tab-body" id="sendMode">
+
+      <!-- 传输模式选择 -->
+      <div class="transfer-mode-box">
+        <div class="transfer-mode-title">传输模式</div>
+
+        <label class="transfer-mode-item">
+          <input type="radio" name="transferMode" id="transferNormal" value="normal" checked>
+          <span>
+            <strong>普通传输</strong>
+            <small>有效期内可下载，适合普通文件分享</small>
+          </span>
+        </label>
+
+        <label class="transfer-mode-item">
+          <input type="radio" name="transferMode" id="transferPrivate" value="private">
+          <span>
+            <strong>私密传输</strong>
+            <small>阅后即焚，仅允许下载一次</small>
+          </span>
+        </label>
+
+        <div id="privateTip" class="private-tip hidden">
+          私密传输开启后，对方下载一次后文件会立即从服务器删除，取件码同时失效。
+        </div>
+      </div>
+
       <div class="drop-zone" id="dropZone">
         <div class="drop-text">点击选择文件或拖拽到此处</div>
         <div class="drop-hint">文件直达服务器，网络全兼容，最大支持 2GB</div>
         <input type="file" id="fileInput" hidden>
       </div>
+
       <div class="file-info hidden" id="fileInfo">
         <div class="file-detail">
           <span class="file-name" id="fileName"></span>
           <span class="file-size" id="fileSize"></span>
         </div>
+
         <div class="file-actions">
           <button class="btn-primary" id="btnUpload">上传文件</button>
           <button class="btn-cancel" id="btnCancelFile">取消</button>
         </div>
       </div>
+
       <div class="upload-progress hidden" id="uploadProgress">
         <div class="progress-bar-track">
           <div class="progress-bar-fill" id="uploadFill"></div>
         </div>
+
         <div class="progress-stats">
           <span id="uploadPercent">0%</span>
           <span id="uploadTransferred">-- / --</span>
@@ -51,14 +81,24 @@
     <!-- 接收模式 -->
     <div class="tab-body hidden" id="receiveMode">
       <div class="input-row">
-        <input type="text" id="codeInput" maxlength="5" placeholder="输入取件码" class="input-mono" autocomplete="off">
+        <input
+          type="text"
+          id="codeInput"
+          maxlength="5"
+          placeholder="输入取件码"
+          class="input-mono"
+          autocomplete="off"
+        >
         <button class="btn-primary" id="btnCheck">获取文件</button>
       </div>
+
       <div class="receive-result hidden" id="receiveResult">
         <div class="file-detail">
           <span class="file-name" id="recvName"></span>
           <span class="file-size" id="recvSize"></span>
+          <span id="recvMode" class="mode-text normal"></span>
         </div>
+
         <button class="btn-primary" id="btnDownload">下载文件</button>
       </div>
     </div>
@@ -68,15 +108,22 @@
   <section class="panel hidden" id="codePanel">
     <div class="room-info">
       <div class="label">取件码</div>
+
       <div class="code" id="codeDisplay">-----</div>
+
+      <div id="codeMode" class="mode-text normal"></div>
+
       <button class="btn-icon" id="btnCopy" title="复制取件码">复制取件码</button>
+
       <p class="hint">将取件码发给对方，对方在「接收文件」页输入即可下载</p>
+
       <button class="btn-cancel" id="btnNewSend">继续发送</button>
     </div>
   </section>
 
   <div class="toast hidden" id="toast"></div>
 </div>
+
 <script src="app.js"></script>
 </body>
 </html>
