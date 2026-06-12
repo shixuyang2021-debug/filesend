@@ -89,7 +89,7 @@ function generateCode() {
 }
 
 // 设置下载响应头
-function setDownloadHeaders(res, room, fileSize, contentLength, isPartial, start, end) {
+function setDownloadHeaders(res, room, fileSize, contentLength, isPartial, start, end, acceptRanges = true) {
   const { originalName, fallbackName } = getSafeFileName(room.fileName);
   const encodedName = encodeRFC5987ValueChars(originalName);
 
@@ -98,11 +98,16 @@ function setDownloadHeaders(res, room, fileSize, contentLength, isPartial, start
     'Content-Disposition',
     `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`
   );
-  res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Length', contentLength);
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
+
+  if (acceptRanges) {
+    res.setHeader('Accept-Ranges', 'bytes');
+  } else {
+    res.setHeader('Accept-Ranges', 'none');
+  }
 
   if (isPartial) {
     res.status(206);
