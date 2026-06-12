@@ -278,6 +278,21 @@ app.get('/api/room/:code', (req, res) => {
 // 私密模式：阅后即焚，只允许下载一次，下载完成后立即删除
 // =========================
 
+app.head('/api/download/:code', (req, res) => {
+  const code = req.params.code.toUpperCase();
+  const room = rooms.get(code);
+
+  if (!room || !fs.existsSync(room.filePath)) {
+    return res.status(404).end();
+  }
+
+  const stat = fs.statSync(room.filePath);
+  const fileSize = stat.size;
+
+  setDownloadHeaders(res, room, fileSize, fileSize, false, 0, fileSize - 1, true);
+  res.end();
+});
+
 app.get('/api/download/:code', (req, res) => {
   const code = req.params.code.toUpperCase();
   const room = rooms.get(code);
@@ -290,14 +305,8 @@ app.get('/api/download/:code', (req, res) => {
     return res.status(404).send('取件码无效或已过期');
   }
 
-  // 私密模式：一旦开始下载，就锁定，防止多端重复下载
-  if (room.mode === 'private') {
-    if (room.downloading || room.downloaded) {
-      return res.status(410).send('私密文件已被读取或正在读取');
-    }
-
-    room.downloading = true;
-    rooms.set(code, room);
+  if (room.mode === 'private' && room.downloaded) {
+    return res.status(410).send('私密文件已被读取');
   }
 
   const filePath = room.filePath;
@@ -309,55 +318,22 @@ app.get('/api/download/:code', (req, res) => {
     `[下载请求] ${code} - ${room.mode} - ${room.fileName} - Range: ${range || 'none'}`
   );
 
-  let stream;
-  let finished = false;
+  let start = 0;
+  let end = fileSize - 1;
+  let isPartial = false;
 
-  function afterDownloadComplete() {
-    if (finished) return;
-    finished = true;
-
-    if (room.mode === 'private') {
-      room.downloaded = true;
-      removeRoomAndFile(code, '私密传输下载完成，阅后即焚');
-    } else {
-      console.log(`[下载响应完成] ${code} - ${room.fileName}`);
-    }
-  }
-
-  function afterDownloadAbort() {
-    if (finished) return;
-    finished = true;
-
-    // 私密传输如果下载中断，保守处理：直接删除
-    // 这样保密性更强，避免同一个私密码反复尝试
-    if (room.mode === 'private') {
-      room.downloaded = true;
-      removeRoomAndFile(code, '私密传输下载中断，已销毁');
-    } else {
-      console.log(`[下载中断] ${code} - ${room.fileName}`);
-    }
-  }
-
-  res.on('finish', afterDownloadComplete);
-  res.on('close', () => {
-    // close 可能在 finish 后触发，所以用 finished 防重复
-    if (!res.writableEnded) {
-      afterDownloadAbort();
-    }
-  });
-
-  // Range 分段下载
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');
-    let start = parseInt(parts[0], 10);
-    let end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 
-    if (Number.isNaN(start) || start < 0) {
-      start = 0;
+    const rangeStart = parseInt(parts[0], 10);
+    const rangeEnd = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+    if (!Number.isNaN(rangeStart) && rangeStart >= 0) {
+      start = rangeStart;
     }
 
-    if (Number.isNaN(end) || end >= fileSize) {
-      end = fileSize - 1;
+    if (!Number.isNaN(rangeEnd) && rangeEnd < fileSize) {
+      end = rangeEnd;
     }
 
     if (start > end || start >= fileSize) {
@@ -366,36 +342,73 @@ app.get('/api/download/:code', (req, res) => {
       return res.end();
     }
 
-    const contentLength = end - start + 1;
-
-    setDownloadHeaders(res, room, fileSize, contentLength, true, start, end);
-
-    stream = fs.createReadStream(filePath, { start, end });
-
-    stream.on('error', (err) => {
-      console.error('[下载失败]', err);
-      if (!res.headersSent) {
-        res.status(500).send('下载失败');
-      } else {
-        res.destroy(err);
-      }
-    });
-
-    stream.pipe(res);
-    return;
+    isPartial = true;
   }
 
-  // 普通整文件下载
-  setDownloadHeaders(res, room, fileSize, fileSize, false, 0, fileSize - 1);
+  const contentLength = end - start + 1;
 
-  stream = fs.createReadStream(filePath);
+  setDownloadHeaders(
+    res,
+    room,
+    fileSize,
+    contentLength,
+    isPartial,
+    start,
+    end,
+    true
+  );
+
+  const stream = fs.createReadStream(filePath, { start, end });
+
+  let streamEnded = false;
+
+  stream.on('end', () => {
+    streamEnded = true;
+  });
 
   stream.on('error', (err) => {
     console.error('[下载失败]', err);
+
     if (!res.headersSent) {
       res.status(500).send('下载失败');
     } else {
       res.destroy(err);
+    }
+  });
+
+  res.on('finish', () => {
+    console.log(
+      `[下载响应完成] ${code} - ${room.mode} - ${room.fileName} - ${start}-${end}/${fileSize}`
+    );
+
+    /**
+     * 私密传输删除规则：
+     * 只有当完整文件被发送完成时才删除。
+     *
+     * 这样可以兼容：
+     * 1. 手机浏览器先 HEAD 探测
+     * 2. 手机浏览器先请求小片段 Range
+     * 3. 手机下载器用 Range: bytes=0-
+     */
+    const isFullFileResponse = start === 0 && end === fileSize - 1;
+
+    if (room.mode === 'private' && streamEnded && isFullFileResponse) {
+      const latestRoom = rooms.get(code);
+
+      if (latestRoom) {
+        latestRoom.downloaded = true;
+        rooms.set(code, latestRoom);
+      }
+
+      removeRoomAndFile(code, '私密传输完整下载完成，阅后即焚');
+    }
+  });
+
+  res.on('close', () => {
+    if (!streamEnded) {
+      console.log(
+        `[下载连接关闭] ${code} - ${room.mode} - ${room.fileName} - ${start}-${end}/${fileSize}`
+      );
     }
   });
 
