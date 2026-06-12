@@ -11,14 +11,17 @@ const PORT = process.env.PORT || 3000;
 // 基础配置
 // =========================
 
-// 文件最大上传限制：建议 Railway 上先别太大
-const MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024; // 2GB
+// 最大上传限制：2GB
+const MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024;
 
 // 普通文件保存时间：10分钟
 const MAX_FILE_AGE = 10 * 60 * 1000;
 
-// 私密文件保存时间：10分钟，下载一次后立即删除
+// 私密文件保存时间：10分钟；但被领取后会进入私密票据逻辑
 const MAX_PRIVATE_FILE_AGE = 10 * 60 * 1000;
+
+// 私密下载票据有效期：5分钟
+const PRIVATE_TICKET_AGE = 5 * 60 * 1000;
 
 // 上传中断的 .uploading 半成品文件保留时间：3分钟
 const MAX_UPLOADING_AGE = 3 * 60 * 1000;
@@ -32,9 +35,11 @@ if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-// 内存房间存储
-// 注意：Railway 重启后 Map 会清空，uploads 里的文件会变成孤儿文件，由定时任务清理
+// 取件码记录
 const rooms = new Map();
+
+// 私密下载票据记录
+const privateTickets = new Map();
 
 // =========================
 // 工具函数
@@ -49,6 +54,7 @@ function safeDeleteFile(filePath) {
   } catch (err) {
     console.error('[删除文件失败]', filePath, err);
   }
+
   return false;
 }
 
@@ -72,7 +78,6 @@ function fmtMB(bytes) {
   return (bytes / 1024 / 1024).toFixed(1);
 }
 
-// 取件码生成，5位
 const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 function generateCode() {
@@ -88,9 +93,8 @@ function generateCode() {
   return id;
 }
 
-// 设置下载响应头
-function setDownloadHeaders(res, room, fileSize, contentLength, isPartial, start, end, acceptRanges = true) {
-  const { originalName, fallbackName } = getSafeFileName(room.fileName);
+function setDownloadHeaders(res, fileInfo, fileSize, contentLength, isPartial, start, end) {
+  const { originalName, fallbackName } = getSafeFileName(fileInfo.fileName);
   const encodedName = encodeRFC5987ValueChars(originalName);
 
   res.setHeader('Content-Type', 'application/octet-stream');
@@ -98,16 +102,11 @@ function setDownloadHeaders(res, room, fileSize, contentLength, isPartial, start
     'Content-Disposition',
     `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`
   );
+  res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Length', contentLength);
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-
-  if (acceptRanges) {
-    res.setHeader('Accept-Ranges', 'bytes');
-  } else {
-    res.setHeader('Accept-Ranges', 'none');
-  }
 
   if (isPartial) {
     res.status(206);
@@ -128,12 +127,117 @@ function removeRoomAndFile(code, reason) {
   console.log(`[删除] ${code} - ${room.fileName} - ${reason}`);
 }
 
+/**
+ * 通用文件发送函数
+ * 支持：
+ * 1. GET 下载
+ * 2. HEAD 探测
+ * 3. Range 分段下载
+ */
+function sendFileWithRange(req, res, fileInfo, onFullDownloadComplete) {
+  const filePath = fileInfo.filePath;
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('文件不存在或已过期');
+  }
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+
+  let start = 0;
+  let end = fileSize - 1;
+  let isPartial = false;
+
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const rangeStart = parseInt(parts[0], 10);
+    const rangeEnd = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+    if (!Number.isNaN(rangeStart) && rangeStart >= 0) {
+      start = rangeStart;
+    }
+
+    if (!Number.isNaN(rangeEnd) && rangeEnd < fileSize) {
+      end = rangeEnd;
+    }
+
+    if (start > end || start >= fileSize) {
+      res.status(416);
+      res.setHeader('Content-Range', `bytes */${fileSize}`);
+      return res.end();
+    }
+
+    isPartial = true;
+  }
+
+  const contentLength = end - start + 1;
+
+  setDownloadHeaders(
+    res,
+    fileInfo,
+    fileSize,
+    contentLength,
+    isPartial,
+    start,
+    end
+  );
+
+  if (req.method === 'HEAD') {
+    return res.end();
+  }
+
+  const stream = fs.createReadStream(filePath, { start, end });
+
+  let streamEnded = false;
+
+  stream.on('end', () => {
+    streamEnded = true;
+  });
+
+  stream.on('error', (err) => {
+    console.error('[下载失败]', err);
+
+    if (!res.headersSent) {
+      res.status(500).send('下载失败');
+    } else {
+      res.destroy(err);
+    }
+  });
+
+  res.on('finish', () => {
+    const isFullFileResponse = start === 0 && end === fileSize - 1;
+
+    console.log(
+      `[下载响应完成] ${fileInfo.code || fileInfo.ticket || '-'} - ${fileInfo.fileName} - ${start}-${end}/${fileSize}`
+    );
+
+    if (
+      streamEnded &&
+      isFullFileResponse &&
+      typeof onFullDownloadComplete === 'function'
+    ) {
+      onFullDownloadComplete();
+    }
+  });
+
+  res.on('close', () => {
+    if (!streamEnded) {
+      console.log(
+        `[下载连接关闭] ${fileInfo.code || fileInfo.ticket || '-'} - ${fileInfo.fileName} - ${start}-${end}/${fileSize}`
+      );
+    }
+  });
+
+  stream.pipe(res);
+}
+
 // =========================
 // Multer 配置
 // =========================
 
 // 上传中的文件先用 .uploading 后缀
-// 上传成功后再 rename 成正式文件
+// 上传成功后再改成正式文件名
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
   filename: (req, file, cb) => {
@@ -157,6 +261,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // =========================
 // API：上传文件
+// mode=normal 普通传输
+// mode=private 私密传输
 // =========================
 
 app.post('/api/upload', (req, res) => {
@@ -168,7 +274,6 @@ app.post('/api/upload', (req, res) => {
   });
 
   upload.single('file')(req, res, (err) => {
-    // multer 出错，比如文件过大、网络中断
     if (err) {
       if (req.file && req.file.path) {
         safeDeleteFile(req.file.path);
@@ -181,16 +286,17 @@ app.post('/api/upload', (req, res) => {
       }
 
       console.error('[上传失败]', err);
+
       return res.status(500).json({
         error: '上传失败'
       });
     }
 
-    // 请求已经中断，删除半成品文件
     if (aborted) {
       if (req.file && req.file.path) {
         safeDeleteFile(req.file.path);
       }
+
       return;
     }
 
@@ -203,7 +309,6 @@ app.post('/api/upload', (req, res) => {
     const tempPath = req.file.path;
     const finalPath = tempPath.replace(/\.uploading$/, '');
 
-    // 前端传 mode=private 表示私密传输
     const modeFromClient = (req.body.mode || 'normal').toLowerCase();
     const mode = modeFromClient === 'private' ? 'private' : 'normal';
 
@@ -227,7 +332,9 @@ app.post('/api/upload', (req, res) => {
       fileSize: req.file.size,
       filePath: finalPath,
       createdAt: Date.now(),
-      downloading: false,
+
+      // 私密传输状态
+      claimed: false,
       downloaded: false
     });
 
@@ -262,10 +369,9 @@ app.get('/api/room/:code', (req, res) => {
     });
   }
 
-  // 私密传输已经被锁定/下载过，则不可再查询
-  if (room.mode === 'private' && (room.downloading || room.downloaded)) {
+  if (room.mode === 'private' && (room.claimed || room.downloaded)) {
     return res.status(410).json({
-      error: '私密文件已被读取或正在读取'
+      error: '私密文件已被领取或已读取'
     });
   }
 
@@ -278,9 +384,9 @@ app.get('/api/room/:code', (req, res) => {
 });
 
 // =========================
-// API：下载文件
-// 普通模式：可多次下载，直到过期
-// 私密模式：阅后即焚，只允许下载一次，下载完成后立即删除
+// API：下载入口
+// 普通传输：直接下载
+// 私密传输：取件码只换一次私密下载票据
 // =========================
 
 app.head('/api/download/:code', (req, res) => {
@@ -291,11 +397,8 @@ app.head('/api/download/:code', (req, res) => {
     return res.status(404).end();
   }
 
-  const stat = fs.statSync(room.filePath);
-  const fileSize = stat.size;
-
-  setDownloadHeaders(res, room, fileSize, fileSize, false, 0, fileSize - 1, true);
-  res.end();
+  // HEAD 只是让浏览器探测文件大小，不触发阅后即焚
+  return sendFileWithRange(req, res, room, null);
 });
 
 app.get('/api/download/:code', (req, res) => {
@@ -310,114 +413,81 @@ app.get('/api/download/:code', (req, res) => {
     return res.status(404).send('取件码无效或已过期');
   }
 
-  if (room.mode === 'private' && room.downloaded) {
-    return res.status(410).send('私密文件已被读取');
+  // 普通传输：直接下载，可重复下载，直到过期
+  if (room.mode !== 'private') {
+    return sendFileWithRange(req, res, room, null);
   }
 
-  const filePath = room.filePath;
-  const stat = fs.statSync(filePath);
-  const fileSize = stat.size;
-  const range = req.headers.range;
-
-  console.log(
-    `[下载请求] ${code} - ${room.mode} - ${room.fileName} - Range: ${range || 'none'}`
-  );
-
-  let start = 0;
-  let end = fileSize - 1;
-  let isPartial = false;
-
-  if (range) {
-    const parts = range.replace(/bytes=/, '').split('-');
-
-    const rangeStart = parseInt(parts[0], 10);
-    const rangeEnd = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-
-    if (!Number.isNaN(rangeStart) && rangeStart >= 0) {
-      start = rangeStart;
-    }
-
-    if (!Number.isNaN(rangeEnd) && rangeEnd < fileSize) {
-      end = rangeEnd;
-    }
-
-    if (start > end || start >= fileSize) {
-      res.status(416);
-      res.setHeader('Content-Range', `bytes */${fileSize}`);
-      return res.end();
-    }
-
-    isPartial = true;
+  // 私密传输：取件码只允许领取一次下载票据
+  if (room.claimed || room.downloaded) {
+    return res.status(410).send('私密文件已被领取或已读取');
   }
 
-  const contentLength = end - start + 1;
+  room.claimed = true;
+  rooms.set(code, room);
 
-  setDownloadHeaders(
-    res,
-    room,
-    fileSize,
-    contentLength,
-    isPartial,
-    start,
-    end,
-    true
-  );
+  const ticket = crypto.randomUUID();
 
-  const stream = fs.createReadStream(filePath, { start, end });
-
-  let streamEnded = false;
-
-  stream.on('end', () => {
-    streamEnded = true;
+  privateTickets.set(ticket, {
+    ticket,
+    code,
+    fileName: room.fileName,
+    fileSize: room.fileSize,
+    filePath: room.filePath,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + PRIVATE_TICKET_AGE
   });
 
-  stream.on('error', (err) => {
-    console.error('[下载失败]', err);
+  console.log(`[私密票据生成] ${code} -> ${ticket}`);
 
-    if (!res.headersSent) {
-      res.status(500).send('下载失败');
-    } else {
-      res.destroy(err);
-    }
+  // 让手机系统下载器访问真正下载地址
+  return res.redirect(302, `/api/private-file/${ticket}`);
+});
+
+// =========================
+// API：私密票据真实下载地址
+// 允许 HEAD / Range / 多次连接
+// 完整下载完成后删除文件和取件码
+// =========================
+
+app.head('/api/private-file/:ticket', (req, res) => {
+  const ticket = req.params.ticket;
+  const fileInfo = privateTickets.get(ticket);
+
+  if (
+    !fileInfo ||
+    Date.now() > fileInfo.expiresAt ||
+    !fs.existsSync(fileInfo.filePath)
+  ) {
+    return res.status(404).end();
+  }
+
+  return sendFileWithRange(req, res, fileInfo, null);
+});
+
+app.get('/api/private-file/:ticket', (req, res) => {
+  const ticket = req.params.ticket;
+  const fileInfo = privateTickets.get(ticket);
+
+  if (
+    !fileInfo ||
+    Date.now() > fileInfo.expiresAt ||
+    !fs.existsSync(fileInfo.filePath)
+  ) {
+    return res.status(404).send('私密下载链接无效或已过期');
+  }
+
+  return sendFileWithRange(req, res, fileInfo, () => {
+    const latest = privateTickets.get(ticket);
+
+    if (!latest) return;
+
+    safeDeleteFile(latest.filePath);
+    privateTickets.delete(ticket);
+    rooms.delete(latest.code);
+
+    console.log(`[阅后即焚] ${latest.code} - ${latest.fileName}`);
   });
-
-  res.on('finish', () => {
-    console.log(
-      `[下载响应完成] ${code} - ${room.mode} - ${room.fileName} - ${start}-${end}/${fileSize}`
-    );
-
-    /**
-     * 私密传输删除规则：
-     * 只有当完整文件被发送完成时才删除。
-     *
-     * 这样可以兼容：
-     * 1. 手机浏览器先 HEAD 探测
-     * 2. 手机浏览器先请求小片段 Range
-     * 3. 手机下载器用 Range: bytes=0-
-     */
-    const isFullFileResponse = start === 0 && end === fileSize - 1;
-
-    if (room.mode === 'private' && streamEnded && isFullFileResponse) {
-      const latestRoom = rooms.get(code);
-
-      if (latestRoom) {
-        latestRoom.downloaded = true;
-        rooms.set(code, latestRoom);
-      }
-
-      removeRoomAndFile(code, '私密传输完整下载完成，阅后即焚');
-    }
-  });
-
-  res.on('close', () => {
-    if (!streamEnded) {
-      console.log(
-        `[下载连接关闭] ${code} - ${room.mode} - ${room.fileName} - ${start}-${end}/${fileSize}`
-      );
-    }
-  });
-
-  stream.pipe(res);
 });
 
 // =========================
@@ -441,22 +511,38 @@ app.get('/api/admin/files', (req, res) => {
     });
   }
 
-  const list = [];
+  const roomList = [];
+  const ticketList = [];
 
   for (const [code, room] of rooms) {
-    list.push({
+    roomList.push({
       code,
       mode: room.mode,
       fileName: room.fileName,
       fileSize: room.fileSize,
       filePath: room.filePath,
       createdAt: new Date(room.createdAt).toLocaleString(),
-      downloading: room.downloading,
+      claimed: room.claimed,
       downloaded: room.downloaded
     });
   }
 
-  res.json(list);
+  for (const [ticket, fileInfo] of privateTickets) {
+    ticketList.push({
+      ticket,
+      code: fileInfo.code,
+      fileName: fileInfo.fileName,
+      fileSize: fileInfo.fileSize,
+      filePath: fileInfo.filePath,
+      createdAt: new Date(fileInfo.createdAt).toLocaleString(),
+      expiresAt: new Date(fileInfo.expiresAt).toLocaleString()
+    });
+  }
+
+  res.json({
+    rooms: roomList,
+    privateTickets: ticketList
+  });
 });
 
 // =========================
@@ -469,7 +555,9 @@ setInterval(() => {
 
   // 1. 清理 rooms 中的过期文件
   for (const [code, room] of rooms) {
-    const maxAge = room.mode === 'private' ? MAX_PRIVATE_FILE_AGE : MAX_FILE_AGE;
+    const maxAge = room.mode === 'private'
+      ? MAX_PRIVATE_FILE_AGE
+      : MAX_FILE_AGE;
 
     if (now - room.createdAt > maxAge) {
       if (fs.existsSync(room.filePath)) {
@@ -483,7 +571,22 @@ setInterval(() => {
     }
   }
 
-  // 2. 扫描 uploads，清理上传中断文件和孤儿文件
+  // 2. 清理过期的私密下载票据
+  for (const [ticket, fileInfo] of privateTickets) {
+    if (now > fileInfo.expiresAt) {
+      privateTickets.delete(ticket);
+
+      // 私密票据过期后，文件也销毁
+      safeDeleteFile(fileInfo.filePath);
+      rooms.delete(fileInfo.code);
+
+      cleaned++;
+
+      console.log(`[清理私密票据] ${fileInfo.code} - ${fileInfo.fileName}`);
+    }
+  }
+
+  // 3. 扫描 uploads，清理上传中断文件和孤儿文件
   if (fs.existsSync(UPLOAD_DIR)) {
     const uploadFiles = fs.readdirSync(UPLOAD_DIR);
 
@@ -495,9 +598,16 @@ setInterval(() => {
         if (!stat.isFile()) continue;
 
         const isUploadingFile = file.endsWith('.uploading');
-        const isReferenced = Array.from(rooms.values()).some(
+
+        const isInRooms = Array.from(rooms.values()).some(
           room => room.filePath === filePath
         );
+
+        const isInTickets = Array.from(privateTickets.values()).some(
+          ticket => ticket.filePath === filePath
+        );
+
+        const isReferenced = isInRooms || isInTickets;
 
         // 上传中断的半成品文件：3分钟后删除
         if (isUploadingFile && now - stat.mtimeMs > MAX_UPLOADING_AGE) {
@@ -507,7 +617,7 @@ setInterval(() => {
           continue;
         }
 
-        // 孤儿文件：不在 rooms 记录里，且超过普通文件保存时间，删除
+        // 孤儿文件：不在 rooms / tickets 记录里，且超过普通文件保存时间，删除
         if (!isReferenced && now - stat.mtimeMs > MAX_FILE_AGE) {
           fs.unlinkSync(filePath);
           cleaned++;
@@ -536,6 +646,7 @@ app.use((err, req, res, next) => {
   }
 
   console.error('[服务器错误]', err);
+
   res.status(500).json({
     error: '服务器错误'
   });
@@ -548,8 +659,10 @@ app.use((err, req, res, next) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log('\n  文件快传服务已启动');
   console.log(`  端口: ${PORT}`);
-  console.log(`  文件保存时间: ${MAX_FILE_AGE / 60 / 1000} 分钟`);
+  console.log(`  最大上传限制: ${MAX_UPLOAD_SIZE / 1024 / 1024 / 1024} GB`);
+  console.log(`  普通文件保存时间: ${MAX_FILE_AGE / 60 / 1000} 分钟`);
   console.log(`  私密文件保存时间: ${MAX_PRIVATE_FILE_AGE / 60 / 1000} 分钟`);
+  console.log(`  私密票据有效期: ${PRIVATE_TICKET_AGE / 60 / 1000} 分钟`);
   console.log(`  上传中断文件清理时间: ${MAX_UPLOADING_AGE / 60 / 1000} 分钟`);
   console.log(`  地址: http://localhost:${PORT}\n`);
 });
